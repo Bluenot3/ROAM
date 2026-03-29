@@ -479,7 +479,7 @@ Body: `{ type: 'zip' | 'pdf' | 'video', selected: [screenshotId, ...] }`
 Body: `{ prompt: string, context?: object }`
 
 - Model: `gemini-1.5-flash`
-- Key: `AQ.Ab8RN6KSwHakIU85ExKw6q1CxvU1Jhtrct2LtsHlEmJMVhxxqw`
+- Key: `YOUR_API_KEY`
 - Role: AI video director for CanvasScreen — helps users reorder clips, suggest pacing, narrate sequences
 - Prompt prefix: `"You are an AI video director for the Shot app..."`
 - **Fallback:** If Gemini fails, returns one of 3 hardcoded plausible AI-sounding responses (no error shown to user)
