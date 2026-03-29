@@ -1,0 +1,25 @@
+{
+  "name": "roam-backend",
+  "type": "module",
+  "version": "1.0.0",
+  "description": "ROAM — Document any website, automatically",
+  "scripts": {
+    "start": "node backend.mjs",
+    "build": "cd shot-app && npm install && npm run build",
+    "install:all": "npm install && cd shot-app && npm install",
+    "dev": "node backend.mjs"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "archiver": "^7.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.18.2",
+    "pdf-lib": "^1.17.1",
+    "playwright": "^1.40.0",
+    "uuid": "^9.0.0"
+  }
+}

@@ -1,0 +1,32 @@
+# Environment — never commit secrets
+.env
+.env.local
+
+# Dependencies
+node_modules/
+shot-app/node_modules/
+
+# Build output
+shot-app/dist/
+
+# Scan sessions (screenshots, videos, session data)
+sessions/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy flat-file auth (replaced by Supabase)
+users.json
+tokens.json
+
+# Temp scripts
+copy_frontend.ps1
+
+# IDE
+.vscode/
+.idea/
