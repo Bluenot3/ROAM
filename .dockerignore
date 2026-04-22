@@ -1,0 +1,10 @@
+node_modules
+shot-app/node_modules
+sessions
+*.log
+.env
+.env.local
+backend.log
+backend-err.log
+tokens.json
+users.json
