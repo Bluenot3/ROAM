@@ -214,6 +214,9 @@ async function discoverPages(rootUrl, maxPages, primaryOnly) {
   const urlObj = new URL(rootUrl)
   const hostname = urlObj.hostname
 
+  // Skip Firecrawl entirely if no key — use free Playwright BFS instead
+  if (!FIRECRAWL_KEY) return []
+
   try {
     const body = JSON.stringify({ url: rootUrl, limit: Math.min(maxPages * 2, 100) })
     const resp = await fetchJson('https://api.firecrawl.dev/v1/map', {
@@ -473,11 +476,11 @@ function capitalize(s) {
 }
 
 // ─── Main scan runner ─────────────────────────────────────────────────────────
-const INITIAL_SCREENSHOTS = 7
+const INITIAL_SCREENSHOTS = 5
 
 async function runScan(sessionId, rootUrl, settings) {
   const {
-    maxPages = 20,
+    maxPages = 10,
     primaryOnly = false,
     viewportWidth = 1440,
     viewportHeight = 900,

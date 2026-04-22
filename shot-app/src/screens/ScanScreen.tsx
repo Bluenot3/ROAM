@@ -52,8 +52,9 @@ export default function ScanScreen({ navigate, sessionId: initialSessionId, pend
   const [activeUrl, setActiveUrl] = useState<string | null>(null)
   const [scanUrl, setScanUrl] = useState<string>('')
   const [selectedUrls, setSelectedUrls] = useState<Set<string>>(new Set())
+  const [showContinuePrompt, setShowContinuePrompt] = useState(false)
+  const [remainingCount, setRemainingCount] = useState(0)
   const esRef = useRef<EventSource | null>(null)
-  // Track whether this is a fresh scan from home (auto-navigate to gallery on preview_ready)
   const fromHomeRef = useRef(!!pendingScanUrl)
   const sessionIdRef = useRef<string | undefined>(initialSessionId)
 
@@ -139,18 +140,11 @@ export default function ScanScreen({ navigate, sessionId: initialSessionId, pend
     es.addEventListener('preview_ready', (e: MessageEvent) => {
       const data = JSON.parse(e.data)
       setActiveUrl(null)
-      // Fresh scan from home → auto-navigate to gallery to showcase the UI
-      if (fromHomeRef.current) {
-        fromHomeRef.current = false
-        // Store session id so gallery can pick it up
-        onSessionReady?.(sessionIdRef.current!)
-        navigate('gallery', { sessionId: sessionIdRef.current })
-        return
-      }
-      // Returning from gallery → show selection UI
-      setRealPhase('preview_ready')
       setSelectedUrls(new Set(data.remainingPages.map((p: any) => p.url)))
-      setRealLog(l => [...l.slice(-30), `Preview ready — ${data.previewCount} screenshots taken. Select pages to continue.`])
+      setRemainingCount(data.remainingPages.length)
+      setRealPhase('preview_ready')
+      setShowContinuePrompt(true)
+      setRealLog(l => [...l.slice(-30), `${data.previewCount} pages captured — waiting for your input…`])
     })
 
     es.addEventListener('page_error', (e: MessageEvent) => {
@@ -233,6 +227,7 @@ export default function ScanScreen({ navigate, sessionId: initialSessionId, pend
 
   async function handleContinue() {
     if (!sessionId) return
+    setShowContinuePrompt(false)
     setRealPhase('screenshotting')
     setRealLog(l => [...l, `Continuing — ${selectedUrls.size} pages selected...`])
     try {
@@ -440,7 +435,88 @@ export default function ScanScreen({ navigate, sessionId: initialSessionId, pend
             </div>
           </div>
         </div>
-        <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+        {/* ── Continue Prompt Modal ── */}
+        {showContinuePrompt && (
+          <div style={{
+            position: 'fixed', inset: 0, zIndex: 9999,
+            background: 'rgba(0,0,0,0.65)',
+            backdropFilter: 'blur(6px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <div style={{
+              background: 'var(--bg-2)',
+              border: '1px solid var(--border)',
+              borderRadius: 16,
+              padding: '28px 32px',
+              maxWidth: 380,
+              width: '90%',
+              boxShadow: '0 24px 64px rgba(0,0,0,0.5)',
+              display: 'flex', flexDirection: 'column', gap: 20,
+              animation: 'popIn 0.18s cubic-bezier(0.34,1.56,0.64,1)',
+            }}>
+              {/* Icon + title */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: 10, flexShrink: 0,
+                  background: 'rgba(251,191,36,0.12)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>
+                  <span style={{ fontSize: 18 }}>✋</span>
+                </div>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-1)', marginBottom: 3 }}>
+                    Preview ready
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.5 }}>
+                    {realScreenshots.length} pages captured
+                    {remainingCount > 0 ? ` · ${remainingCount} more found` : ''}
+                  </div>
+                </div>
+              </div>
+
+              {/* Body */}
+              <div style={{
+                fontSize: 13, color: 'var(--text-2)', lineHeight: 1.65,
+                padding: '12px 14px', borderRadius: 8,
+                background: 'rgba(255,255,255,0.03)',
+                border: '1px solid var(--border)',
+              }}>
+                {remainingCount > 0
+                  ? <>Scan <strong style={{ color: 'var(--text-1)' }}>{Math.min(5, remainingCount)} more page{Math.min(5, remainingCount) !== 1 ? 's' : ''}</strong> from the remaining {remainingCount}? Or head straight to the gallery with what you have.</>
+                  : <>All discovered pages have been captured. Head to the gallery to review your screenshots.</>
+                }
+              </div>
+
+              {/* Actions */}
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button
+                  className="btn-ghost"
+                  onClick={() => {
+                    setShowContinuePrompt(false)
+                    navigate('gallery', { sessionId })
+                  }}
+                  style={{ flex: 1, fontSize: 13, padding: '9px 0', justifyContent: 'center' }}
+                >
+                  Done — view gallery
+                </button>
+                {remainingCount > 0 && (
+                  <button
+                    className="btn-primary"
+                    onClick={handleContinue}
+                    style={{ flex: 1, fontSize: 13, padding: '9px 0', justifyContent: 'center' }}
+                  >
+                    Scan {Math.min(5, remainingCount)} more ↗
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <style>{`
+          @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+          @keyframes popIn { from { opacity: 0; transform: scale(0.92); } to { opacity: 1; transform: scale(1); } }
+        `}</style>
       </div>
     )
   }
