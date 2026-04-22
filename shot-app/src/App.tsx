@@ -8,11 +8,9 @@ import HistoryScreen from './screens/HistoryScreen'
 import AnalyticsScreen from './screens/AnalyticsScreen'
 import TemplatesScreen from './screens/TemplatesScreen'
 import SettingsScreen from './screens/SettingsScreen'
-import LoginScreen from './screens/LoginScreen'
 import Sidebar from './components/Sidebar'
 import ToastContainer from './components/ToastContainer'
 import { useAuth } from './contexts/AuthContext'
-import { showToast } from './lib/toast'
 import type { ScanSettings } from './lib/api'
 
 export type Screen = 'home' | 'scan' | 'gallery' | 'canvas' | 'export' | 'history' | 'analytics' | 'templates' | 'settings'
@@ -41,7 +39,7 @@ const KEYBOARD_NAV: Partial<Record<string, Screen>> = {
 }
 
 function App() {
-  const { user, loading, refreshUser, applyPromo } = useAuth()
+  const { loading } = useAuth()
   const [screen, setScreen] = useState<Screen>('home')
   const [animKey, setAnimKey] = useState(0)
   const [sessionId, setSessionId] = useState<string | undefined>(undefined)
@@ -59,38 +57,6 @@ function App() {
     if (meta?.pendingScanSettings !== undefined) setPendingScanSettings(meta.pendingScanSettings)
   }
 
-  // Handle Stripe redirect success
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const upgrade = params.get('upgrade')
-    const cs = params.get('cs')
-    if (upgrade === 'success' && cs) {
-      const token = localStorage.getItem('roam_token')
-      if (token) {
-        fetch(`/api/stripe/verify?cs=${cs}`, { headers: { Authorization: `Bearer ${token}` } })
-          .then(r => r.json())
-          .then(d => {
-            if (d.success) {
-              refreshUser()
-              showToast('ZEN+ activated! Unlimited scans unlocked.', 'success', 5000)
-            }
-          })
-          .catch(() => {})
-      }
-      window.history.replaceState({}, '', '/')
-    }
-    if (upgrade === 'cancelled') {
-      window.history.replaceState({}, '', '/')
-    }
-    // Apply any pending promo from login screen
-    const pendingPromo = localStorage.getItem('roam_pending_promo')
-    if (pendingPromo && user) {
-      localStorage.removeItem('roam_pending_promo')
-      applyPromo(pendingPromo).then(() => {
-        showToast('Promo applied — unlimited access unlocked!', 'success', 5000)
-      }).catch(() => {})
-    }
-  }, [user])
 
   useEffect(() => {
     document.title = SCREEN_TITLES[screen] ?? 'ROAM'
@@ -127,16 +93,6 @@ function App() {
         <span style={{ fontSize: 13, color: 'var(--text-3)' }}>Loading ROAM…</span>
         <style>{`@keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.5} }`}</style>
       </div>
-    )
-  }
-
-  // Not authenticated — show login
-  if (!user) {
-    return (
-      <>
-        <LoginScreen onAuth={() => { /* AuthContext auto-updates */ }} />
-        <ToastContainer />
-      </>
     )
   }
 

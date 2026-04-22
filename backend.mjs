@@ -501,7 +501,12 @@ async function runScan(sessionId, rootUrl, settings) {
 
   let browser, context
   try {
-    const launchOpts = { headless: true }
+    const launchOpts = {
+      headless: true,
+      args: process.platform === 'linux'
+        ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+        : [],
+    }
     if (CHROMIUM_PATH) launchOpts.executablePath = CHROMIUM_PATH
     browser = await chromium.launch(launchOpts)
 
@@ -872,12 +877,8 @@ app.post('/api/stripe/webhook', express.raw({ type: 'application/json' }), async
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-// POST /api/scan — start a scan
-app.post('/api/scan', requireAuth, async (req, res) => {
-  const user = req.user
-  if (user.freeScansUsed >= FREE_SCAN_LIMIT && !user.hasPromo && !user.subscriptionActive) {
-    return res.status(402).json({ error: 'upgrade_required', message: 'Upgrade to ZEN+ for unlimited scans.' })
-  }
+// POST /api/scan — start a scan (no auth required)
+app.post('/api/scan', async (req, res) => {
   const { url, settings = {} } = req.body
   if (!url) return res.status(400).json({ error: 'url required' })
 
@@ -894,15 +895,9 @@ app.post('/api/scan', requireAuth, async (req, res) => {
     videoPath: null,
     discoveredPages: [],
     createdAt: new Date().toISOString(),
-    userId: req.user.id,
+    userId: 'local',
   }
   saveSession(sessionId, session)
-
-  // Atomic scan count increment via Supabase RPC
-  sbFetch('/rest/v1/rpc/increment_scan_count', {
-    method: 'POST', token: req.token,
-    body: { user_id: user.id },
-  }).catch(e => console.error('Scan count increment error:', e.message))
 
   // Run scan in background
   runScan(sessionId, normalizedUrl, settings).catch(e => {

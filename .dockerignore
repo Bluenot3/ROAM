@@ -1,0 +1,9 @@
+node_modules
+shot-app/node_modules
+sessions
+*.log
+.env
+.env.*
+!.env.example
+shot-app/dist
+C:\pw-browsers

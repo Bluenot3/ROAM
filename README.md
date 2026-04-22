@@ -1,3 +1,13 @@
+---
+title: ROAM
+emoji: 🧭
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # ROAM — Document Any Website, Automatically
 
 > **Stop taking screenshots manually.** Paste a URL and get everything—HD screenshots, video walkthroughs, site maps, and AI narration—in seconds.
