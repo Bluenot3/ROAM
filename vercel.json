@@ -4,8 +4,8 @@
   "outputDirectory": "shot-app/dist",
   "functions": {
     "api/index.mjs": {
-      "maxDuration": 300,
-      "memory": 3009
+      "maxDuration": 60,
+      "memory": 1024
     }
   },
   "rewrites": [
