@@ -482,7 +482,7 @@ const INITIAL_SCREENSHOTS = 5
 
 async function runScan(sessionId, rootUrl, settings) {
   const {
-    maxPages = 10,
+    maxPages: rawMaxPages = 10,
     primaryOnly = false,
     viewportWidth = 1440,
     viewportHeight = 900,
@@ -491,6 +491,8 @@ async function runScan(sessionId, rootUrl, settings) {
     waitTime = 1500,
     scrollForScreenshot = true,
   } = settings
+  // Cap page count on Vercel to fit within the 60s serverless timeout
+  const maxPages = IS_VERCEL ? Math.min(rawMaxPages, INITIAL_SCREENSHOTS) : rawMaxPages
 
   const sessionDir = path.join(SESSIONS_DIR, sessionId)
   if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
@@ -528,7 +530,7 @@ async function runScan(sessionId, rootUrl, settings) {
         size: { width: viewportWidth, height: viewportHeight },
       }
     }
-    context = await browser.newContext(contextOptions)
+    // context is created AFTER discovery so only one Chromium context exists at a time
 
     // ── Discover pages ──
     emit(sessionId, 'log', { msg: `Crawling ${rootUrl} via Firecrawl...` })
@@ -577,6 +579,8 @@ async function runScan(sessionId, rootUrl, settings) {
     saveSession(sessionId, session)
 
     // ── Screenshot each page ──
+    // Open the screenshot context now (after BFS closed its own context)
+    context = await browser.newContext(contextOptions)
     const page = await context.newPage()
     const screenshots = []
     let screenshotIndex = 0
