@@ -461,6 +461,111 @@ function fetchJson(url, options = {}) {
   })
 }
 
+// ─── Lightweight HTTP helpers (no Playwright needed) ─────────────────────────
+function fetchHtml(url, redirectCount = 0) {
+  return new Promise((resolve) => {
+    if (redirectCount > 5) return resolve(null)
+    let parsedUrl
+    try { parsedUrl = new URL(url) } catch { return resolve(null) }
+    const lib = parsedUrl.protocol === 'https:' ? https : http
+    const req = lib.request({
+      hostname: parsedUrl.hostname,
+      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+      path: parsedUrl.pathname + parsedUrl.search,
+      method: 'GET',
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ROAM/1.0)', Accept: 'text/html,application/xml,*/*' },
+      timeout: 10000,
+    }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+        try { resolve(fetchHtml(new URL(res.headers.location, url).href, redirectCount + 1)) } catch { resolve(null) }
+        return
+      }
+      let data = ''
+      res.on('data', c => { data += c })
+      res.on('end', () => resolve(data))
+    })
+    req.on('error', () => resolve(null))
+    req.on('timeout', () => { req.destroy(); resolve(null) })
+    req.end()
+  })
+}
+
+async function discoverWithHttp(rootUrl, maxPages, primaryOnly) {
+  function normUrl(u) {
+    try { const p = new URL(u); p.hash = ''; p.search = ''; let s = p.href; if (s.endsWith('/') && s !== p.origin + '/') s = s.slice(0, -1); return s } catch { return null }
+  }
+  const rootObj = new URL(rootUrl)
+  const result = []
+  const seen = new Set()
+
+  // Try sitemap.xml first (fastest — just one HTTP request)
+  try {
+    const sitemapHtml = await fetchHtml(`${rootObj.origin}/sitemap.xml`)
+    if (sitemapHtml && sitemapHtml.includes('<loc>')) {
+      let sitemapUrls = [...sitemapHtml.matchAll(/<loc>\s*(https?:\/\/[^<]+)\s*<\/loc>/gi)]
+        .map(m => m[1].trim())
+        .filter(u => { try { const h = new URL(u).hostname; return h === rootObj.hostname || h === 'www.' + rootObj.hostname || rootObj.hostname === 'www.' + h } catch { return false } })
+        .filter(u => !u.match(/sitemap/i))
+      // Check sub-sitemaps if none found
+      if (sitemapUrls.length === 0) {
+        const subs = [...sitemapHtml.matchAll(/<loc>\s*([^<]+sitemap[^<]+)\s*<\/loc>/gi)].map(m => m[1].trim())
+        if (subs.length > 0) {
+          const sub = subs.find(s => /pages/i.test(s)) || subs[0]
+          const subHtml = await fetchHtml(sub)
+          if (subHtml) sitemapUrls = [...subHtml.matchAll(/<loc>\s*(https?:\/\/[^<]+)\s*<\/loc>/gi)]
+            .map(m => m[1].trim())
+            .filter(u => { try { return new URL(u).hostname === rootObj.hostname } catch { return false } })
+        }
+      }
+      if (sitemapUrls.length > 0) {
+        sitemapUrls.sort((a, b) => new URL(a).pathname.split('/').filter(Boolean).length - new URL(b).pathname.split('/').filter(Boolean).length)
+        if (!sitemapUrls.some(u => { try { return new URL(u).pathname === '/' } catch { return false } })) sitemapUrls.unshift(rootUrl)
+        for (const u of sitemapUrls) {
+          if (result.length >= maxPages) break
+          const d = new URL(u).pathname.split('/').filter(Boolean).length
+          if (primaryOnly && d > 1) continue
+          const n = normUrl(u)
+          if (n && !seen.has(n)) { seen.add(n); const parts = new URL(u).pathname.split('/').filter(Boolean); result.push({ url: u, title: parts.length ? capitalize(parts[parts.length - 1].replace(/[-_]/g, ' ')) : 'Home', depth: d }) }
+        }
+        if (result.length > 0) return result
+      }
+    }
+  } catch (_) {}
+
+  // Fallback: parse homepage <a href> links
+  try {
+    const html = await fetchHtml(rootUrl)
+    if (html) {
+      const rootNorm = normUrl(rootUrl)
+      if (rootNorm) { seen.add(rootNorm); result.push({ url: rootUrl, title: 'Home', depth: 0 }) }
+      for (const m of html.matchAll(/href=["']([^"'#?][^"']*?)["']/gi)) {
+        if (result.length >= maxPages) break
+        let href; try { href = new URL(m[1], rootUrl).href } catch { continue }
+        const parsed = new URL(href)
+        const sameHost = parsed.hostname === rootObj.hostname || parsed.hostname === 'www.' + rootObj.hostname || rootObj.hostname === 'www.' + parsed.hostname
+        if (!sameHost || parsed.pathname.match(/\.(pdf|zip|png|jpg|gif|svg|mp4|webp|ico|css|js|xml)$/i)) continue
+        const d = parsed.pathname.split('/').filter(Boolean).length
+        if (primaryOnly && d > 1) continue
+        const n = normUrl(href); if (!n || seen.has(n)) continue
+        seen.add(n); const parts = parsed.pathname.split('/').filter(Boolean)
+        result.push({ url: href, title: parts.length ? capitalize(parts[parts.length - 1].replace(/[-_]/g, ' ')) : 'Home', depth: d })
+      }
+    }
+  } catch (_) {}
+
+  if (result.length === 0) result.push({ url: rootUrl, title: 'Home', depth: 0 })
+  return result.slice(0, maxPages)
+}
+
+function mergePagesDedup(base, extra, maxPages) {
+  function normUrl(u) { try { const p = new URL(u); p.hash = ''; p.search = ''; let s = p.href; if (s.endsWith('/') && s !== p.origin + '/') s = s.slice(0, -1); return s } catch { return u } }
+  const seen = new Set(base.map(p => normUrl(p.url)))
+  const merged = [...base]
+  for (const p of extra) { const n = normUrl(p.url); if (!seen.has(n) && merged.length < maxPages) { seen.add(n); merged.push(p) } }
+  merged.sort((a, b) => a.depth - b.depth)
+  return merged
+}
+
 // ─── Page categorization ──────────────────────────────────────────────────────
 function categorize(url) {
   const p = new URL(url).pathname.toLowerCase()
@@ -503,6 +608,21 @@ async function runScan(sessionId, rootUrl, settings) {
   session.videoPath = null
   saveSession(sessionId, session)
 
+  // ── On Vercel: discover pages via HTTP BEFORE launching the browser ──
+  // Playwright BFS during discovery would create a second browser context concurrently
+  // with the screenshot context, causing an OOM crash on 1024 MB serverless RAM.
+  let pages
+  if (IS_VERCEL) {
+    emit(sessionId, 'log', { msg: `Discovering pages for ${rootUrl}...` })
+    pages = await discoverPages(rootUrl, maxPages, primaryOnly)
+    if (pages.length < Math.min(3, maxPages) || pages.every(p => p.depth === 0)) {
+      emit(sessionId, 'log', { msg: `Expanding with HTTP crawler...` })
+      const httpPages = await discoverWithHttp(rootUrl, maxPages, primaryOnly)
+      pages = mergePagesDedup(pages, httpPages, maxPages)
+    }
+    emit(sessionId, 'log', { msg: `Found ${pages.length} pages — launching browser for screenshots...` })
+  }
+
   emit(sessionId, 'log', { msg: 'Initializing Playwright browser...' })
   emit(sessionId, 'log', { msg: 'Launching Chromium headless...' })
 
@@ -530,40 +650,18 @@ async function runScan(sessionId, rootUrl, settings) {
         size: { width: viewportWidth, height: viewportHeight },
       }
     }
-    // context is created AFTER discovery so only one Chromium context exists at a time
 
-    // ── Discover pages ──
-    emit(sessionId, 'log', { msg: `Crawling ${rootUrl} via Firecrawl...` })
-    let pages = await discoverPages(rootUrl, maxPages, primaryOnly)
-
-    // If Firecrawl returned too few real pages, use Playwright BFS to find more
-    if (pages.length < Math.min(5, maxPages) || pages.every(p => p.depth === 0)) {
-      emit(sessionId, 'log', { msg: `Firecrawl found ${pages.length} page(s). Expanding with Playwright crawler...` })
-      const playwrightPages = await discoverWithPlaywright(browser, rootUrl, maxPages, primaryOnly)
-      // Merge & dedup using normalized URLs
-      function normUrl(u) {
-        try {
-          const p = new URL(u); p.hash = ''; p.search = ''
-          let s = p.href
-          if (s.endsWith('/') && s !== p.origin + '/') s = s.slice(0, -1)
-          return s
-        } catch { return u }
+    // ── On non-Vercel: discover pages now (Playwright BFS is safe with more RAM) ──
+    if (!IS_VERCEL) {
+      emit(sessionId, 'log', { msg: `Crawling ${rootUrl} via Firecrawl...` })
+      pages = await discoverPages(rootUrl, maxPages, primaryOnly)
+      if (pages.length < Math.min(5, maxPages) || pages.every(p => p.depth === 0)) {
+        emit(sessionId, 'log', { msg: `Firecrawl found ${pages.length} page(s). Expanding with Playwright crawler...` })
+        const playwrightPages = await discoverWithPlaywright(browser, rootUrl, maxPages, primaryOnly)
+        pages = mergePagesDedup(pages, playwrightPages, maxPages)
       }
-      const seen = new Set(pages.map(p => normUrl(p.url)))
-      const merged = [...pages]
-      for (const p of playwrightPages) {
-        const n = normUrl(p.url)
-        if (!seen.has(n) && merged.length < maxPages) {
-          seen.add(n)
-          merged.push(p)
-        }
-      }
-      pages = merged
-      // Sort by depth
-      pages.sort((a, b) => a.depth - b.depth)
+      emit(sessionId, 'log', { msg: `Found ${pages.length} pages` })
     }
-
-    emit(sessionId, 'log', { msg: `Found ${pages.length} pages` })
 
     const pagesWithMeta = pages.map((p, i) => ({
       url: p.url,
@@ -578,8 +676,7 @@ async function runScan(sessionId, rootUrl, settings) {
     session.discoveredPages = pagesWithMeta
     saveSession(sessionId, session)
 
-    // ── Screenshot each page ──
-    // Open the screenshot context now (after BFS closed its own context)
+    // ── Screenshot each page (single context, no concurrent BFS context) ──
     context = await browser.newContext(contextOptions)
     const page = await context.newPage()
     const screenshots = []
