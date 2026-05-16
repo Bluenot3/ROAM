@@ -167,10 +167,7 @@ function flattenParams(obj, prefix = '') {
 }
 
 const app = express()
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim())
-  : ['http://localhost:5173', 'http://localhost:4173', 'http://localhost:3001', APP_URL]
-app.use(cors({ origin: ALLOWED_ORIGINS }))
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS', 'DELETE', 'PATCH'], allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'] }))
 app.use(express.json())
 
 // In-memory store for sessions and SSE clients
@@ -635,7 +632,15 @@ async function runScan(sessionId, rootUrl, settings) {
     if (IS_VERCEL) {
       const chromiumPkg = (await import('@sparticuz/chromium')).default
       launchOpts.executablePath = await chromiumPkg.executablePath()
-      launchOpts.args = [...chromiumPkg.args, '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+      launchOpts.args = [
+        ...chromiumPkg.args,
+        '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu',
+        '--disable-extensions', '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding',
+        '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+        '--mute-audio', '--no-first-run', '--disable-sync',
+        '--disable-default-apps', '--metrics-recording-only',
+      ]
     } else if (CHROMIUM_PATH) {
       launchOpts.executablePath = CHROMIUM_PATH
     }
@@ -682,15 +687,26 @@ async function runScan(sessionId, rootUrl, settings) {
     const screenshots = []
     let screenshotIndex = 0
 
+    // Reduced wait time on Vercel to fit within 60s timeout
+    const effectiveWait = IS_VERCEL ? Math.min(waitTime, 800) : waitTime
+
+    // normUrl for dedup during link extraction
+    function normUrl(u) { try { const p = new URL(u); p.hash = ''; p.search = ''; let s = p.href; if (s.endsWith('/') && s !== p.origin + '/') s = s.slice(0, -1); return s } catch { return null } }
+
+    // Dynamic queue: Playwright extracts new links as it visits each page,
+    // filling up to maxPages even when HTTP discovery found fewer.
+    const captureQueue = [...pagesWithMeta]
+    const seenUrls = new Set(pagesWithMeta.map(p => normUrl(p.url)).filter(Boolean))
+
     async function capturePage(pageInfo, totalExpected) {
       emit(sessionId, 'page_start', { url: pageInfo.url, index: screenshotIndex })
       emit(sessionId, 'log', { msg: `→ ${pageInfo.url} — navigating...` })
       try {
         await page.goto(pageInfo.url, { waitUntil: 'domcontentloaded', timeout: 30000 })
-        await page.waitForTimeout(waitTime)
+        await page.waitForTimeout(effectiveWait)
 
-        // Smooth scroll for video effect
-        if (scrollForScreenshot) {
+        // Smooth scroll for video/full-page effect (skipped on Vercel to save ~2s per page)
+        if (scrollForScreenshot && !IS_VERCEL) {
           await page.evaluate(async () => {
             await new Promise(resolve => {
               const totalHeight = document.body.scrollHeight
@@ -744,6 +760,31 @@ async function runScan(sessionId, rootUrl, settings) {
           index: screenshotData.index,
           total: totalExpected,
         })
+
+        // ── Discover-as-you-go: extract links from this page while we're here ──
+        // Fills the queue up to maxPages without a separate discovery pass.
+        if (seenUrls.size < maxPages) {
+          try {
+            const origin = new URL(rootUrl).origin
+            const hrefs = await page.evaluate((origin) => {
+              return [...document.querySelectorAll('a[href]')]
+                .map(a => { try { const u = new URL(a.href); if (u.origin === origin && !u.pathname.match(/\.(pdf|zip|png|jpg|gif|svg|mp4|webp|ico|css|js|xml)$/i)) { u.hash = ''; u.search = ''; return u.href } } catch {}; return null })
+                .filter(Boolean)
+            }, origin).catch(() => [])
+            for (const href of hrefs) {
+              if (seenUrls.size >= maxPages) break
+              const n = normUrl(href)
+              if (n && !seenUrls.has(n)) {
+                seenUrls.add(n)
+                const depth = new URL(href).pathname.split('/').filter(Boolean).length
+                if (primaryOnly && depth > 1) continue
+                const parts = new URL(href).pathname.split('/').filter(Boolean)
+                const newEntry = { url: href, title: parts.length ? capitalize(parts[parts.length - 1].replace(/[-_]/g, ' ')) : 'Page', depth, category: categorize(href), index: -1 }
+                captureQueue.push(newEntry)
+              }
+            }
+          } catch (_) {}
+        }
       } catch (err) {
         emit(sessionId, 'log', { msg: `✗ ${pageInfo.url} — error: ${err.message}` })
         emit(sessionId, 'page_error', { url: pageInfo.url, error: err.message })
@@ -751,53 +792,52 @@ async function runScan(sessionId, rootUrl, settings) {
     }
 
     // ── Take initial preview batch (first INITIAL_SCREENSHOTS pages) ──
-    const initialBatch = pagesWithMeta.slice(0, INITIAL_SCREENSHOTS)
-    const remainingBatch = pagesWithMeta.slice(INITIAL_SCREENSHOTS)
+    const initialBatch = captureQueue.splice(0, INITIAL_SCREENSHOTS)
+    const remainingBatch = captureQueue // remaining pre-discovered pages (non-Vercel)
 
     for (const pageInfo of initialBatch) {
-      await capturePage(pageInfo, pagesWithMeta.length)
+      await capturePage(pageInfo, maxPages)
     }
 
-    // ── If more pages exist, pause (or auto-continue on Vercel serverless) ──
-    if (remainingBatch.length > 0) {
-      if (IS_VERCEL) {
-        // Serverless: no pause — capture all remaining pages immediately
-        emit(sessionId, 'log', { msg: `Capturing ${remainingBatch.length} more pages...` })
-        for (const pageInfo of remainingBatch) {
-          await capturePage(pageInfo, pagesWithMeta.length)
-        }
-      } else {
-        session.status = 'preview_ready'
-        session.remainingPages = remainingBatch
-        saveSession(sessionId, session)
+    // ── If more pages exist, continue (or pause on non-Vercel for user selection) ──
+    if (IS_VERCEL) {
+      // Drain the dynamic queue: pages discovered during initial capture visits
+      while (captureQueue.length > 0 && screenshotIndex < maxPages) {
+        const pageInfo = captureQueue.shift()
+        pageInfo.index = screenshotIndex
+        await capturePage(pageInfo, maxPages)
+      }
+    } else if (remainingBatch.length > 0) {
+      session.status = 'preview_ready'
+      session.remainingPages = remainingBatch
+      saveSession(sessionId, session)
 
-        emit(sessionId, 'preview_ready', {
-          screenshots,
-          remainingPages: remainingBatch,
-          previewCount: screenshots.length,
-        })
+      emit(sessionId, 'preview_ready', {
+        screenshots,
+        remainingPages: remainingBatch,
+        previewCount: screenshots.length,
+      })
 
-        // Wait for the /continue endpoint to be called
-        const { selectedUrls } = await new Promise(resolve => {
-          session.continueResolve = resolve
-          sessions.set(sessionId, session)
-        })
+      // Wait for the /continue endpoint to be called
+      const { selectedUrls } = await new Promise(resolve => {
+        session.continueResolve = resolve
+        sessions.set(sessionId, session)
+      })
 
-        session.status = 'running'
-        session.continueResolve = null
-        saveSession(sessionId, session)
+      session.status = 'running'
+      session.continueResolve = null
+      saveSession(sessionId, session)
 
-        let continuationPages = remainingBatch
-        if (selectedUrls && selectedUrls.length > 0) {
-          const sel = new Set(selectedUrls)
-          continuationPages = remainingBatch.filter(p => sel.has(p.url))
-        }
+      let continuationPages = remainingBatch
+      if (selectedUrls && selectedUrls.length > 0) {
+        const sel = new Set(selectedUrls)
+        continuationPages = remainingBatch.filter(p => sel.has(p.url))
+      }
 
-        emit(sessionId, 'log', { msg: `Continuing — capturing ${continuationPages.length} more pages...` })
-        const newTotal = screenshots.length + continuationPages.length
-        for (const pageInfo of continuationPages) {
-          await capturePage(pageInfo, newTotal)
-        }
+      emit(sessionId, 'log', { msg: `Continuing — capturing ${continuationPages.length} more pages...` })
+      const newTotal = screenshots.length + continuationPages.length
+      for (const pageInfo of continuationPages) {
+        await capturePage(pageInfo, newTotal)
       }
     }
 
