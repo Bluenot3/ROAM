@@ -59,8 +59,12 @@ export async function getScan(sessionId: string): Promise<ScanSession> {
   return res.json()
 }
 
-export function createEventSource(sessionId: string): EventSource {
-  return new EventSource(`${BASE}/api/events/${sessionId}`)
+export function createEventSource(sessionId: string, scanUrl?: string, settings?: ScanSettings): EventSource {
+  const params = new URLSearchParams()
+  if (scanUrl) params.set('url', scanUrl)
+  if (settings && Object.keys(settings).length > 0) params.set('s', JSON.stringify(settings))
+  const qs = params.toString()
+  return new EventSource(`${BASE}/api/events/${sessionId}${qs ? '?' + qs : ''}`)
 }
 
 export async function sendAiPrompt(

@@ -17,6 +17,8 @@ import http from 'http'
 import os from 'os'
 import { randomBytes } from 'crypto'
 
+const IS_VERCEL = process.env.VERCEL === '1'
+
 // ─── Dynamically find the best Chromium executable ───────────────────────────
 function findChromiumExecutable() {
   const home = os.homedir()
@@ -48,7 +50,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const FIRECRAWL_KEY = process.env.FIRECRAWL_KEY || ''
 const GEMINI_KEY    = process.env.GEMINI_KEY    || ''
 const PORT = process.env.PORT || 3001
-const SESSIONS_DIR = path.join(__dirname, 'sessions')
+const SESSIONS_DIR = IS_VERCEL ? '/tmp/sessions' : path.join(__dirname, 'sessions')
 // ── Stripe ──────────────────────────────────────────────────────────────────
 const STRIPE_SECRET_KEY      = process.env.STRIPE_SECRET_KEY      || ''
 const STRIPE_PUBLISHABLE_KEY = process.env.STRIPE_PUBLISHABLE_KEY || ''
@@ -59,7 +61,7 @@ const FREE_SCAN_LIMIT   = 1
 const APP_URL  = process.env.APP_URL || 'http://localhost:3001'
 const DIST_DIR = process.env.DIST_DIR || path.join(__dirname, 'shot-app', 'dist')
 
-if (!existsSync(SESSIONS_DIR)) mkdirSync(SESSIONS_DIR, { recursive: true })
+try { if (!existsSync(SESSIONS_DIR)) mkdirSync(SESSIONS_DIR, { recursive: true }) } catch {}
 
 // ─── Supabase Auth & Database ──────────────────────────────────────────────────
 const SUPABASE_URL     = process.env.SUPABASE_URL      || 'https://wpljjicijfzbuvfpnchm.supabase.co'
@@ -192,11 +194,11 @@ function getSession(id) {
 function saveSession(id, data) {
   sessions.set(id, data)
   const sessionDir = path.join(SESSIONS_DIR, id)
-  if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
   try {
+    if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true })
     writeFileSync(path.join(sessionDir, 'session.json'), JSON.stringify(data, null, 2))
   } catch (e) {
-    // ignore write errors
+    // ignore write errors (serverless /tmp may not always persist)
   }
 }
 
@@ -506,17 +508,21 @@ async function runScan(sessionId, rootUrl, settings) {
   try {
     const launchOpts = {
       headless: true,
-      args: process.platform === 'linux'
-        ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        : [],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     }
-    if (CHROMIUM_PATH) launchOpts.executablePath = CHROMIUM_PATH
+    if (IS_VERCEL) {
+      const chromiumPkg = (await import('@sparticuz/chromium')).default
+      launchOpts.executablePath = await chromiumPkg.executablePath()
+      launchOpts.args = [...chromiumPkg.args, '--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+    } else if (CHROMIUM_PATH) {
+      launchOpts.executablePath = CHROMIUM_PATH
+    }
     browser = await chromium.launch(launchOpts)
 
     const contextOptions = {
       viewport: { width: viewportWidth, height: viewportHeight },
     }
-    if (recordVideo) {
+    if (recordVideo && !IS_VERCEL) {
       contextOptions.recordVideo = {
         dir: sessionDir,
         size: { width: viewportWidth, height: viewportHeight },
@@ -651,39 +657,46 @@ async function runScan(sessionId, rootUrl, settings) {
       await capturePage(pageInfo, pagesWithMeta.length)
     }
 
-    // ── If more pages exist, pause and let the user select which to capture ──
+    // ── If more pages exist, pause (or auto-continue on Vercel serverless) ──
     if (remainingBatch.length > 0) {
-      session.status = 'preview_ready'
-      session.remainingPages = remainingBatch
-      saveSession(sessionId, session)
+      if (IS_VERCEL) {
+        // Serverless: no pause — capture all remaining pages immediately
+        emit(sessionId, 'log', { msg: `Capturing ${remainingBatch.length} more pages...` })
+        for (const pageInfo of remainingBatch) {
+          await capturePage(pageInfo, pagesWithMeta.length)
+        }
+      } else {
+        session.status = 'preview_ready'
+        session.remainingPages = remainingBatch
+        saveSession(sessionId, session)
 
-      emit(sessionId, 'preview_ready', {
-        screenshots,
-        remainingPages: remainingBatch,
-        previewCount: screenshots.length,
-      })
+        emit(sessionId, 'preview_ready', {
+          screenshots,
+          remainingPages: remainingBatch,
+          previewCount: screenshots.length,
+        })
 
-      // Wait for the /continue endpoint to be called
-      const { selectedUrls } = await new Promise(resolve => {
-        session.continueResolve = resolve
-        sessions.set(sessionId, session)
-      })
+        // Wait for the /continue endpoint to be called
+        const { selectedUrls } = await new Promise(resolve => {
+          session.continueResolve = resolve
+          sessions.set(sessionId, session)
+        })
 
-      session.status = 'running'
-      session.continueResolve = null
-      saveSession(sessionId, session)
+        session.status = 'running'
+        session.continueResolve = null
+        saveSession(sessionId, session)
 
-      // Filter to only selected pages (or all if none specified)
-      let continuationPages = remainingBatch
-      if (selectedUrls && selectedUrls.length > 0) {
-        const sel = new Set(selectedUrls)
-        continuationPages = remainingBatch.filter(p => sel.has(p.url))
-      }
+        let continuationPages = remainingBatch
+        if (selectedUrls && selectedUrls.length > 0) {
+          const sel = new Set(selectedUrls)
+          continuationPages = remainingBatch.filter(p => sel.has(p.url))
+        }
 
-      emit(sessionId, 'log', { msg: `Continuing — capturing ${continuationPages.length} more pages...` })
-      const newTotal = screenshots.length + continuationPages.length
-      for (const pageInfo of continuationPages) {
-        await capturePage(pageInfo, newTotal)
+        emit(sessionId, 'log', { msg: `Continuing — capturing ${continuationPages.length} more pages...` })
+        const newTotal = screenshots.length + continuationPages.length
+        for (const pageInfo of continuationPages) {
+          await capturePage(pageInfo, newTotal)
+        }
       }
     }
 
@@ -902,10 +915,13 @@ app.post('/api/scan', async (req, res) => {
   }
   saveSession(sessionId, session)
 
-  // Run scan in background
-  runScan(sessionId, normalizedUrl, settings).catch(e => {
-    console.error('Scan error:', e)
-  })
+  if (!IS_VERCEL) {
+    // On persistent servers: start scan immediately in background
+    runScan(sessionId, normalizedUrl, settings).catch(e => {
+      console.error('Scan error:', e)
+    })
+  }
+  // On Vercel: scan is triggered when the SSE connection opens (same function invocation)
 
   res.json({ sessionId })
 })
@@ -958,6 +974,8 @@ app.get('/api/scan/:id', (req, res) => {
 // GET /api/events/:id — SSE stream
 app.get('/api/events/:id', (req, res) => {
   const { id } = req.params
+  const { url: scanUrl, s: settingsStr } = req.query
+
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
@@ -967,6 +985,24 @@ app.get('/api/events/:id', (req, res) => {
   if (!sseClients.has(id)) sseClients.set(id, new Set())
   sseClients.get(id).add(res)
 
+  // On Vercel: start the scan from this SSE invocation using URL passed as query param
+  if (IS_VERCEL && scanUrl) {
+    let scanSettings = {}
+    try { if (settingsStr) scanSettings = JSON.parse(settingsStr) } catch {}
+    const vercelSettings = { ...scanSettings, recordVideo: false }
+    const session = {
+      id, url: scanUrl, settings: vercelSettings,
+      status: 'pending', screenshots: [], discoveredPages: [],
+      videoPath: null, remainingPages: [],
+      createdAt: new Date().toISOString(), userId: 'local',
+    }
+    saveSession(id, session)
+    runScan(id, scanUrl, vercelSettings).catch(e => {
+      console.error('Vercel scan error:', e)
+      emit(id, 'scan_error', { error: e.message })
+    })
+    // Fall through to heartbeat — no replay needed (scan just started)
+  } else {
   // Replay all past events so late-connecting clients catch up
   const session = getSession(id)
   if (session) {
@@ -1005,6 +1041,7 @@ app.get('/api/events/:id', (req, res) => {
       res.write(`event: error\ndata: ${JSON.stringify({ message: session.error || 'Scan failed' })}\n\n`)
     }
   }
+  } // end else (non-Vercel replay block)
 
   // Heartbeat to keep connection alive
   const heartbeat = setInterval(() => {
@@ -1187,20 +1224,29 @@ app.use('/screenshots', (req, res) => {
   createReadStream(filePath).pipe(res)
 })
 
-// GET /* — serve frontend dist
-app.use(express.static(DIST_DIR))
-app.get('*', (req, res) => {
-  const indexPath = path.join(DIST_DIR, 'index.html')
-  if (existsSync(indexPath)) {
-    res.sendFile(indexPath)
-  } else {
-    res.status(404).send('Frontend dist not found. Run: npm run build in the shot-app directory.')
-  }
-})
+// GET /* — serve frontend dist (only on persistent servers; Vercel uses CDN static files)
+if (!IS_VERCEL) {
+  app.use(express.static(DIST_DIR))
+  app.get('*', (req, res) => {
+    const indexPath = path.join(DIST_DIR, 'index.html')
+    if (existsSync(indexPath)) {
+      res.sendFile(indexPath)
+    } else {
+      res.status(404).send('Frontend dist not found. Run: npm run build in the shot-app directory.')
+    }
+  })
+}
 
-app.listen(PORT, () => {
-  console.log(`\n🧭 ROAM backend running on http://localhost:${PORT}`)
-  console.log(`   Sessions dir: ${SESSIONS_DIR}`)
-  console.log(`   Frontend dist: ${DIST_DIR}`)
-  console.log(`   Stripe: ${STRIPE_SECRET_KEY ? '✓ configured' : '⚠ STRIPE_SECRET_KEY not set'}\n`)
-})
+// Export for Vercel serverless — the default export IS the Express app (req, res handler)
+export default app
+
+// Only bind a port when run directly (node backend.mjs), not when imported by Vercel
+const __backendFile = fileURLToPath(import.meta.url)
+if (!IS_VERCEL && process.argv[1] === __backendFile) {
+  app.listen(PORT, () => {
+    console.log(`\n🧭 ROAM backend running on http://localhost:${PORT}`)
+    console.log(`   Sessions dir: ${SESSIONS_DIR}`)
+    console.log(`   Frontend dist: ${DIST_DIR}`)
+    console.log(`   Stripe: ${STRIPE_SECRET_KEY ? '✓ configured' : '⚠ STRIPE_SECRET_KEY not set'}\n`)
+  })
+}

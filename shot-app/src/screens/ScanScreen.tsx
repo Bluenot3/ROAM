@@ -91,7 +91,10 @@ export default function ScanScreen({ navigate, sessionId: initialSessionId, pend
   useEffect(() => {
     if (!sessionId) return
 
-    const es = createEventSource(sessionId)
+    // Pass scan URL/settings so Vercel's SSE invocation can start the scan
+    const urlParam = fromHomeRef.current ? (pendingScanUrl || scanUrl) : undefined
+    const settingsParam = fromHomeRef.current ? pendingScanSettings : undefined
+    const es = createEventSource(sessionId, urlParam, settingsParam)
     esRef.current = es
 
     es.addEventListener('log', (e: MessageEvent) => {
